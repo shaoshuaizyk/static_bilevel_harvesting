@@ -171,7 +171,7 @@ class StaticBilevelModel:
                 print(f"Current sequences {sequences} is INFEASIBLE!!!!!!! Adding lazy constraints to eliminate this solution.")
                 model.cbLazy(gp.quicksum(E[r, i, j] for r, i, j in E_selected) <= len(E_selected) - 1)
 
-    def trajectory_plan_on_sequences(self, arms_plan, alpha=1, use_makespan_as_constraint=False, log_to_console=True, heuristics=0.707, tolerance=1e-4):
+    def trajectory_plan_on_sequences(self, arms_plan, alpha=1, use_makespan_as_constraint=False, log_to_console=True, heuristics=0.707, gap=1e-4, tolerance=1e-4):
         """
         Plan the robot arms trajectories based on the given harvesting sequences. The dummy start and end are not necesarry. Use alpha to balance the finishing time and the smoothness of the trajectories.
         alpha = 1: only minimize the finishing time
@@ -179,13 +179,13 @@ class StaticBilevelModel:
         """
         assert arms_plan.harvesting_sequences is not None, "Harvesting sequences must be provided."
         if log_to_console:
-            print(f"Planning trajectories for sequences {arms_plan.harvesting_sequences} with initial finishing time {arms_plan.finishing_time:.3f}...")
+            print(f"Planning trajectories for sequences {arms_plan.harvesting_sequences} with arriving times {arms_plan.arriving_times} and initial finishing time {arms_plan.finishing_time:.3f}...")
 
         is_feasible = True
         with gp.Model("Trajectory_Planning_On_Sequences") as traj_model_with_seq:
             harvesting_sequences = arms_plan.harvesting_sequences
             arriving_times = arms_plan.arriving_times # it could be None
-            tau = arms_plan.finishing_time
+            tau = arms_plan.finishing_time * (1 + gap) # A bit larger than the initial finishing time
             Tmax = tau + self.dt*2
             Tmax_steps = int(np.ceil(Tmax / self.dt))
             M = 10*Tmax  # A large constant for big-M method
@@ -272,7 +272,7 @@ class StaticBilevelModel:
             traj_model_with_seq.setParam('Heuristics', heuristics)
             traj_model_with_seq.setParam('LogToConsole', 1 if log_to_console else 0)
             traj_model_with_seq.setParam('OutputFlag', 1 if log_to_console else 0)
-            # traj_model_with_seq.setParam('gap', gap)
+            traj_model_with_seq.setParam('MIPGap', gap)
 
             traj_model_with_seq.optimize()
 
@@ -281,7 +281,7 @@ class StaticBilevelModel:
                 arms_plan.arriving_times = [[schedule[r, k]*self.dt for k in range(len(harvesting_sequences[r]))] for r in R]
                 finishing_time = makespan.X
                 arms_plan.finishing_time = finishing_time
-                max_ts = int(np.ceil(finishing_time / self.dt))
+                max_ts = int(finishing_time / self.dt)
                 xs = traj_model_with_seq.getAttr('X', X_wpts)
                 zs = traj_model_with_seq.getAttr('X', Z_wpts)
                 paths_x = np.array([[xs[r, ts] for ts in range(max_ts)] for r in R])
@@ -410,6 +410,7 @@ class StaticBilevelModel:
         :param video_name: name of the video file
         :param show_trajectory: whether to show the trajectory plot
         """
+        print(f"Drawing trajectories...")
         self.show_trajectory = show_trajectory
         fig = plt.figure(figsize=(10, 8))
         self.ax = plt.axes()
@@ -421,11 +422,11 @@ class StaticBilevelModel:
         # Draw frame boundaries
         self.ax.plot([0, self.length, self.length, 0, 0], [0, 0, self.height, self.height, 0], color='black', linewidth=2)
 
-        if not show_trajectory:
-            self.draw_init_arms()
+        self.draw_init_arms()
 
         if video:
-            ani = animation.FuncAnimation(fig, self.animation_update, frames=self.max_timestamps, interval=50, repeat=True)
+            max_timestamps = int(self.arms_plan.finishing_time / self.dt)
+            ani = animation.FuncAnimation(fig, self.animation_update, frames=max_timestamps, interval=50, repeat=True)
             ani.save(video_name, writer='ffmpeg', fps=20)
         else:
             for r in range(self.arms_n):
@@ -435,7 +436,7 @@ class StaticBilevelModel:
                 finish_time = self.arms_plan.arriving_times[r][-1] + self.harvesting_times[self.arms_plan.harvesting_sequences[r][-1]] if harvest_number > 0 else 0
                 arm_FPT = harvest_number / finish_time if finish_time > 0 else 0
                 finish_time_steps = round(finish_time / self.dt)
-                total_travel_distance = np.sum([np.sqrt((self.arms_plan.paths_x[r, t+1]-self.arms_plan.paths_x[r, t])**2 + (self.arms_plan.paths_z[r, t+1]-self.arms_plan.paths_z[r, t])**2) for t in range(finish_time_steps)])
+                total_travel_distance = np.sum([np.sqrt((self.arms_plan.paths_x[r, t+1]-self.arms_plan.paths_x[r, t])**2 + (self.arms_plan.paths_z[r, t+1]-self.arms_plan.paths_z[r, t])**2) for t in range(finish_time_steps-1)])
                 print(f"Arm {r+1}: Harvested {harvest_number} fruits, Finishing time: {finish_time:.3f} s, FPT: {arm_FPT:.2f} fruits/s, Total travel distance: {total_travel_distance:.3f} m.")
     
     def draw_fruits(self):
@@ -443,14 +444,15 @@ class StaticBilevelModel:
                                               self.fruits[self.arms_plan.harvesting_sequences[r][k]].coordinate.z, s=25, marker="o", color="black") for k in range(len(self.arms_plan.harvesting_sequences[r]))] for r in range(self.arms_n)]
     
     def draw_init_arms(self):
-        self.gripper_plot = [self.ax.scatter(self.initial_positions[r].x, self.initial_positions[r].z, s=60, marker="1", color=self.color_list[r % len(self.color_list)]) for r in range(self.arms_n)]
+        self.gripper_plot = [self.ax.scatter(self.initial_positions[r].x, self.initial_positions[r].z, s=100, marker="1", color=self.color_list[r % len(self.color_list)]) for r in range(self.arms_n)]
 
     def animation_update(self, i):
         cur_time = i * self.dt
         self.update_arms_and_fruits(i)
         if self.show_trajectory:
             self.update_trajectories(i)
-        plt.title(f"Time: {cur_time:.2f} s. Finishing time: {self.arms_plan.finishing_time:.2f} s.")
+        cur_min_distance_between_arms = min([self.arms_plan.paths_z[r+1, i] - self.arms_plan.paths_z[r, i] for r in range(self.arms_n-1)]) if self.arms_n > 1 else float('inf')
+        plt.title(f"Time: {cur_time:.2f} s. Finishing time: {self.arms_plan.finishing_time:.2f} s. Min distance between arms: {cur_min_distance_between_arms:.2f} m.")
 
     def update_arms_and_fruits(self, time_step):
         cur_time = time_step * self.dt
@@ -472,11 +474,11 @@ class StaticBilevelModel:
                          self.arms_plan.paths_z[r, max(time_step-1, 0):time_step+1],
                          color=self.color_list[r % len(self.color_list)], linewidth=r+1)
             
-    def zone_splitting_planning(self):
+    def zone_splitting_planning(self, gap=0.01):
         fruit_indices = [i for i in range(len(self.fruits))]
         fruit_sorted_by_z = sorted(fruit_indices, key=lambda fruit_idx: self.fruits[fruit_idx].coordinate.z)
         row_indices = self.split_list(fruit_sorted_by_z, self.arms_n, sort_horizontal=True)
-        self.plan_on_row_indices(row_indices)
+        self.plan_on_row_indices(row_indices, gap=gap)
 
     def split_list(self, lst, num_parts, sort_horizontal=False):
         """
@@ -500,10 +502,10 @@ class StaticBilevelModel:
         
         return result
     
-    def plan_on_row_indices(self, sequences):
+    def plan_on_row_indices(self, sequences, gap=0.01):
         finishing_time, arriving_times = self.heuristic_schedule_on_sequences(sequences)
         self.arms_plan = ArmsPlan(harvesting_sequences=sequences, arriving_times=arriving_times, finishing_time=finishing_time)
-        assert self.trajectory_plan_on_sequences(self.arms_plan, alpha=0, use_makespan_as_constraint=True, log_to_console=True), "Final trajectory is infeasible!"
+        assert self.trajectory_plan_on_sequences(self.arms_plan, alpha=0.9, use_makespan_as_constraint=False, log_to_console=True, gap=gap), "Final trajectory is infeasible!"
 
     def heuristic_schedule_on_sequences(self, sequences):
         """
@@ -547,7 +549,7 @@ class StaticBilevelModel:
         ax.plot([0, self.length, self.length, 0, 0], [0, 0, self.height, self.height, 0], color='black', linewidth=2)
         # Draw initial arm positions
         for r in range(self.arms_n):
-            ax.scatter(self.initial_positions[r].x, self.initial_positions[r].z, s=60, marker="1", color=color_list[r % len(color_list)])
+            ax.scatter(self.initial_positions[r].x, self.initial_positions[r].z, s=100, marker="1", color=color_list[r % len(color_list)])
         plt.title("Initial Fruits and Arms Positions")
         plt.show()
 
@@ -580,14 +582,14 @@ class ArmsPlan:
         return (self.finishing_time, -self.moving_speed) < (other.finishing_time, -other.moving_speed)
 
     def __repr__(self) -> str:
-        return f"ArmsPlan(moving_speed={self.moving_speed}, \nfinishing_time={self.finishing_time}, harvest amount={self.harvesting_amount}\nFruit_blocks={self.fruit_blocks}.\nHarvesting_sequences={self.harvesting_sequences}.\nArriving_times={self.arriving_times})."
+        return f"ArmsPlan(moving_speed={self.moving_speed}, \nfinishing_time={self.finishing_time}, harvest amount={self.harvesting_amount}\n\nHarvesting_sequences={self.harvesting_sequences}.\nArriving_times={self.arriving_times})."
 
 
 if __name__ == "__main__":
     # Example usage
-    height = 1.2
+    hheight = 1.2
     length = 1.2
-    arms_n = 2
+    arms_n = 3
     vx_max = 0.5
     vy_max = 0.5
     vz_max = 0.5
@@ -595,22 +597,25 @@ if __name__ == "__main__":
     ay_max = 1.0
     az_max = 1.0
     dt = 0.1
-    safety_distance = 0.0
+    safety_distance = 0.1
     # Generate random fruits for testing
     rng = np.random.default_rng(42)
-    fruit_n = 6
+    fruit_n = 10
     depths = [0.2, 0.5]
     X = rng.uniform(0.0, length, fruit_n) # length
     Y = rng.uniform(depths[0], depths[1], fruit_n)  # depth
     Z = rng.uniform(safety_distance, height - safety_distance, fruit_n)  # height
-    detach_times = rng.uniform(2.0, 3.0, fruit_n)  # detach times
+    detach_times = rng.uniform(2.0, 3.0, fruit_n)  # detach times, it could be a function of ripening levels or it could be a constant.
     fruits = [FruitInfo(X[i], Y[i], Z[i], detach_times[i]) for i in range(fruit_n)]
     model = StaticBilevelModel(fruits, height, length, arms_n, vx_max, vy_max, vz_max, ax_max, ay_max, az_max, dt, safety_distance)
+    model.plot_initial_fruits_and_arms()
     tic = time.time()
-    model.bilevel_trajectory_planning()
+    # model.bilevel_trajectory_planning() # Not working for now
+    model.zone_splitting_planning(gap=0.05) # Larger gap for faster solving
     toc = time.time()
     print(f"Time taken for optimization: {toc - tic:.3f} seconds")
     print("Optimization completed.")
-    # model.draw_trajectories(video=True)
-    model.draw_trajectories(video=False)
+    model.draw_trajectories(video=False, show_trajectory=True)
+    print(f"Model results are:\n{model.arms_plan}")
+    print(f"Trajectories are stored in model.arms_plan.paths_x, paths_y, paths_z.")
     
