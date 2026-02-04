@@ -221,6 +221,7 @@ class StaticBilevelModel:
             # Constraints 2: initial positions
             traj_model_with_seq.addConstrs((X_wpts[r, 0] == self.initial_positions[r].x for r in R), name="initial_x_position")
             traj_model_with_seq.addConstrs((Z_wpts[r, 0] == self.initial_positions[r].z for r in R), name="initial_z_position")
+            traj_model_with_seq.addConstrs((Schedule[r, 0]*self.dt >= self.travel_time_f2f(self.initial_positions[r], self.fruits[harvesting_sequences[r][0]])) for r in R)
 
             # Constraints 3: kinematic constraints
             traj_model_with_seq.addConstrs((X_wpts[r, ts+1] - X_wpts[r, ts] >= self.dt*(-self.vx_max) for r in R for ts in Ts[:-1]), name="max_negative_x_velocity")
@@ -393,12 +394,12 @@ class StaticBilevelModel:
     def travel_time_f2f(self, fruit1, fruit2):
         """
         Calculate the traveling time between two fruits.
-        :param fruit1: first fruit
-        :param fruit2: second fruit
+        :param fruit1: first fruit or initial position
+        :param fruit2: second fruit or initial position
         :return: traveling time
         """
-        dx = abs(fruit1.coordinate.x - fruit2.coordinate.x)
-        dz = abs(fruit1.coordinate.z - fruit2.coordinate.z)
+        dx = abs(fruit1.coordinate.x if hasattr(fruit1, 'coordinate') else fruit1.x - fruit2.coordinate.x if hasattr(fruit2, 'coordinate') else fruit2.x)
+        dz = abs(fruit1.coordinate.z if hasattr(fruit1, 'coordinate') else fruit1.z - fruit2.coordinate.z if hasattr(fruit2, 'coordinate') else fruit2.z)
         dx_time = self.traveling_time(dx, self.vx_max, self.ax_max)
         dz_time = self.traveling_time(dz, self.vz_max, self.az_max)
         return max(dx_time, dz_time)

@@ -13,4 +13,4 @@ It has some problem now, need to improve.
 Divid the fruits into zones vertically with roughly equal number of fruits. Each arm harvests one zone from left to right, according to the order of the arm. Then, do the trajectory planning based on the harvesting sequence and the fruit picking time constraint.
 
 ## Run test
-Run the code in `main.ipynb` with jupyter notebook kernal or run `python static_bilevel.py` in the command line to see the results. Play around with the number of fruits, the number of arms, the random seeds to generate fruits, the gap and the draw trajectories function to see the results.
+Run the code in `main.ipynb` with jupyter notebook kernal or run `python static_bilevel.py` in the command line to see the results. Play around with the number of fruits, the number of arms, the random seeds to generate fruits, the gap and the draw trajectories function to see the results. Non-zero safety distance may not work in some extreme cases.
