@@ -2,6 +2,7 @@ import gurobipy as gp
 from gurobipy import GRB, tuplelist
 import numpy as np
 import time
+import os
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import matplotlib.animation as animation
@@ -171,11 +172,12 @@ class StaticBilevelModel:
                 print(f"Current sequences {sequences} is INFEASIBLE!!!!!!! Adding lazy constraints to eliminate this solution.")
                 model.cbLazy(gp.quicksum(E[r, i, j] for r, i, j in E_selected) <= len(E_selected) - 1)
 
-    def trajectory_plan_on_sequences(self, arms_plan, alpha=1, use_makespan_as_constraint=False, log_to_console=True, heuristics=0.707, gap=1e-4, tolerance=1e-4):
+    def trajectory_plan_on_sequences(self, arms_plan, alpha=1, use_makespan_as_constraint=False, log_to_console=True, heuristics=0.707, gap=1e-4, tolerance=1e-4, horizon_slack=0.5):
         """
         Plan the robot arms trajectories based on the given harvesting sequences. The dummy start and end are not necesarry. Use alpha to balance the finishing time and the smoothness of the trajectories.
         alpha = 1: only minimize the finishing time
         alpha = 0: only minimize the average acceleration
+        :param horizon_slack: extra fraction of time (beyond arms_plan.finishing_time) given to the planning horizon when the makespan is not fixed, so the optimizer isn't artificially capped by an initial guess that may turn out to be too tight.
         """
         assert arms_plan.harvesting_sequences is not None, "Harvesting sequences must be provided."
         if log_to_console:
@@ -186,7 +188,12 @@ class StaticBilevelModel:
             harvesting_sequences = arms_plan.harvesting_sequences
             arriving_times = arms_plan.arriving_times # it could be None
             tau = arms_plan.finishing_time * (1 + gap) # A bit larger than the initial finishing time
-            Tmax = tau + self.dt*2
+            if use_makespan_as_constraint:
+                # tau is pinned exactly as the makespan target (e.g. the bilevel high-level routing target), so the horizon only needs the trailing harvesting time of the last fruit.
+                Tmax = tau + self.dt*2
+            else:
+                # arms_plan.finishing_time here is only a heuristic initial guess (sequence is fixed, but the schedule/finishing time is not). Give the optimizer real slack so it isn't capped below the true optimum, and so the recorded waypoints cover the whole harvesting process instead of getting cut off.
+                Tmax = arms_plan.finishing_time * (1 + horizon_slack) + max(self.harvesting_times) + self.dt*2
             Tmax_steps = int(np.ceil(Tmax / self.dt))
             M = 10*Tmax  # A large constant for big-M method
             R = range(self.arms_n)
@@ -285,8 +292,8 @@ class StaticBilevelModel:
                 max_ts = int(finishing_time / self.dt)
                 xs = traj_model_with_seq.getAttr('X', X_wpts)
                 zs = traj_model_with_seq.getAttr('X', Z_wpts)
-                paths_x = np.array([[xs[r, ts] for ts in range(max_ts)] for r in R])
-                paths_z = np.array([[zs[r, ts] for ts in range(max_ts)] for r in R])
+                paths_x = np.array([[xs[r, ts] for ts in range(min(max_ts, Tmax_steps))] for r in R])
+                paths_z = np.array([[zs[r, ts] for ts in range(min(max_ts, Tmax_steps))] for r in R])
                 arms_plan.paths_x = paths_x
                 arms_plan.paths_z = paths_z
                 # if log_to_console:
@@ -404,14 +411,15 @@ class StaticBilevelModel:
         dz_time = self.traveling_time(dz, self.vz_max, self.az_max)
         return max(dx_time, dz_time)
 
-    def draw_trajectories(self, video=False, video_name="trajectories.mp4", show_trajectory=True):
+    def draw_trajectories(self, video=False, video_name="trajectories.mp4", show_trajectory=True, save_fig=False, fig_name="trajectories.png"):
         """
         Draw the trajectories of the arms.
         :param video: whether to save the video
         :param video_name: name of the video file
         :param show_trajectory: whether to show the trajectory plot
+        :param save_fig: whether to save the figure
+        :param fig_name: name of the figure file
         """
-        print(f"Drawing trajectories...")
         self.show_trajectory = show_trajectory
         fig = plt.figure(figsize=(10, 8))
         self.ax = plt.axes()
@@ -426,20 +434,33 @@ class StaticBilevelModel:
         self.draw_init_arms()
 
         if video:
-            max_timestamps = int(self.arms_plan.finishing_time / self.dt)
+            if not os.path.exists("./mp4"):
+                os.makedirs("./mp4")
+            video_path = os.path.join("./mp4", video_name)
+            print(f"Saving animation to {video_path}...")
+            max_timestamps = min(int(self.arms_plan.finishing_time / self.dt), self.arms_plan.paths_x.shape[1])
             ani = animation.FuncAnimation(fig, self.animation_update, frames=max_timestamps, interval=50, repeat=True)
-            ani.save(video_name, writer='ffmpeg', fps=20)
+            ani.save(video_path, writer='ffmpeg', fps=20)
         else:
+            print(f"Drawing trajectories...")
             for r in range(self.arms_n):
                 self.ax.plot(self.arms_plan.paths_x[r, :], self.arms_plan.paths_z[r, :], color=self.color_list[r % len(self.color_list)], label=f'Arm {r+1} Trajectory', linewidth=r+1)
                 # Show some information
                 harvest_number = len(self.arms_plan.harvesting_sequences[r])
                 finish_time = self.arms_plan.arriving_times[r][-1] + self.harvesting_times[self.arms_plan.harvesting_sequences[r][-1]] if harvest_number > 0 else 0
                 arm_FPT = harvest_number / finish_time if finish_time > 0 else 0
-                finish_time_steps = round(finish_time / self.dt)
+                finish_time_steps = min(round(finish_time / self.dt), self.arms_plan.paths_x.shape[1])
                 total_travel_distance = np.sum([np.sqrt((self.arms_plan.paths_x[r, t+1]-self.arms_plan.paths_x[r, t])**2 + (self.arms_plan.paths_z[r, t+1]-self.arms_plan.paths_z[r, t])**2) for t in range(finish_time_steps-1)])
                 print(f"Arm {r+1}: Harvested {harvest_number} fruits, Finishing time: {finish_time:.3f} s, FPT: {arm_FPT:.2f} fruits/s, Total travel distance: {total_travel_distance:.3f} m.")
-    
+            if save_fig:
+                if not os.path.exists("./fig"):
+                    os.makedirs("./fig")
+                fig_path = os.path.join("./fig", fig_name)
+                plt.savefig(fig_path)
+                print(f"Figure saved to {fig_path}.")
+            plt.legend()
+            plt.title(f"Trajectories of the arms with finishing time {self.arms_plan.finishing_time:.3f} seconds.")
+            plt.show()
     def draw_fruits(self):
         self.fruits_plot = [[self.ax.scatter(self.fruits[self.arms_plan.harvesting_sequences[r][k]].coordinate.x,
                                               self.fruits[self.arms_plan.harvesting_sequences[r][k]].coordinate.z, s=25, marker="o", color="black") for k in range(len(self.arms_plan.harvesting_sequences[r]))] for r in range(self.arms_n)]
